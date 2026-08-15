@@ -1,0 +1,28 @@
+shopsensevenv/
+data/
+intake/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pem
+*.key
+*/site-packages/
+.embcache/          # Gemini embedding disk cache
+*.faiss              # FAISS for vector storage
+*.index               # generic vector index files
+.vscode/
+.idea/               # PyCharm
+*.swp                # vim
+.DS_Store            # macOS Finder metadata
+*.log
+logs/
+tmp/
+.tmp/
+.ipynb_checkpoints/

@@ -1,0 +1,1 @@
+#Sample file to use core as module

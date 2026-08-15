@@ -1,5 +1,6 @@
 # scripts/verify_llm_client.py
 import os
+import json
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -9,10 +10,38 @@ from core.llm_client import LLMClient
 def test_basic_completion():
     client = LLMClient()
     response = client.complete([
-        {"role": "user", "content": "Reply with exactly one word: 'Jai Balayya'"}
+        {"role": "user", "content": "Reply with exactly one sentence: Who is Nandamuri Balayya? "}
     ])
     print(f"Model used: {client.model}")
-    print(f"Response: {response!r}")
+
+    print(f"Plain Response: {response!r}")
+
+    #M1.2 Output format in JSON format - Validating structured output
+    response = client.complete([
+            {"role": "user", "content": "Reply with exactly one sentence: Who is Nandamuri Balayya? "}
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "character_info",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "alias": {"type": "string"},
+                        "occupation": {"type": "string"},
+                        "affiliation": {"type": "string"},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["name", "alias", "occupation", "affiliation", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    )
+    data = json.loads(response)
+    print(f"JSON Response: {json.dumps(data, indent=2)}")
     assert isinstance(response, str), "complete() should return a str"
     assert len(response) > 0, "response should not be empty"
     print("✅ basic completion works")

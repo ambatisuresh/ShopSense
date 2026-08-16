@@ -1,0 +1,18 @@
+# ShopSense — dependencies through M2
+# Python 3.12
+#
+# Everything below is something the code actually imports as of M2 --
+# nothing here is speculative for M3+ (Qdrant, Langfuse, Supermemory,
+# LangGraph get added to this file when those milestones start using them).
+
+# --- M1: provider-agnostic LLM client + structured intake ---
+litellm>=1.50.0          # core/llm_client.py -- sole call site for completion()
+pydantic>=2.0            # core/schema.py -- SupportTicket and enums (v2 API: model_dump())
+python-dotenv>=1.0.0     # .env loading (LLM_PROVIDER, *_API_KEY, *_LLM_MODEL)
+
+# --- M2: tool-enabled single agent ---
+langchain-core>=0.2.0    # agent/support_agent.py -- messages, @tool, bind_tools
+langchain-litellm>=0.1.0 # agent/support_agent.py -- ChatLiteLLM
+
+# --- Testing (M1 + M2) ---
+pytest>=8.0.0

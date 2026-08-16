@@ -16,8 +16,8 @@ emotional cases to human agents.
 ## Milestones
 | # | Milestone | Status |
 |---|-----------|--------|
-| M1 | Provider-agnostic LLM client + structured intake | 🚧 In progress |
-| M2 | Tool-enabled single agent | ⬜ Not started |
+| M1 | Provider-agnostic LLM client + structured intake | ✅ Completed |
+| M2 | Tool-enabled single agent | 🚧 In progress |
 | M3 | Persistent memory + semantic index | ⬜ Not started |
 | M4 | Production RAG + evaluation baseline | ⬜ Not started |
 | M5 | Orchestrated LangGraph workflow with checkpointing | ⬜ Not started |
@@ -41,9 +41,23 @@ GOOGLE_API_KEY=your_key_here
 
 ```
 shopsense/
-├── core/ # LLM client wrapper, config, Pydantic schemas
-├── tests/ # pytest test suite
-└── scripts/ # Verification / utility scripts
+├── core/
+│   ├── llm_client.py       # LiteLLM wrapper — sole call site for completion()
+│   └── schema.py           # Pydantic schemas (SupportTicket, enums)
+├── intake/
+│   ├── reader.py           # JSONL reader — extracts ticket_id + raw_text
+│   └── parser.py           # raw text -> validated SupportTicket, via LLMClient
+├── scripts/
+│   ├── verify_llm_client.py   # smoke test for LLMClient.complete()
+│   └── run_intake.py          # batch runner: reads records.jsonl, parses each ticket
+├── tests/
+│   ├── test_llm_client.py
+│   ├── test_parser.py
+│   └── first.py
+├── data/intake/
+│   └── records.jsonl        # raw ticket intake records (ticket_id, raw_text, ground_truth, etc.)
+├── .gitignore
+└── README.md
 ```
 
 

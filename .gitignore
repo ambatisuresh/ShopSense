@@ -1,6 +1,6 @@
 shopsensevenv/
-data/
-intake/
+data/corpus/
+data/eval/
 .env
 __pycache__/
 *.pyc

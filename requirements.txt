@@ -16,3 +16,6 @@ langchain-litellm>=0.1.0 # agent/support_agent.py -- ChatLiteLLM
 
 # --- Testing (M1 + M2) ---
 pytest>=8.0.0
+
+# M3
+supermemory==3.55.0

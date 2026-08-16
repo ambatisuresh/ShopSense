@@ -13,6 +13,15 @@ Where a scripted response includes a tool_call for order_lookup_tool /
 calculate_refund_tool, the underlying tool's data layer is monkeypatched the
 same way as in test_tools.py, so those tool calls actually execute against
 controlled fixtures rather than the real dataset.
+
+M3 update: run_support_agent now requires customer_ref and a CustomerMemory
+instance. Rather than wiring up a real CustomerMemory (which would mean
+faking the Supermemory SDK here too -- that's tests/test_memory.py's job,
+not this file's), these tests use FakeMemory: a minimal stand-in exposing
+only the two methods support_agent.py and tools/customer_memory_tool.py
+actually call (get_context_block, remember_preference). This keeps this
+file's fakes scoped to what the AGENT LOOP touches, the same separation of
+concerns as FakeChatModel only faking what the loop needs from an LLM.
 """
 from __future__ import annotations
 
@@ -25,13 +34,19 @@ from tools.reliability import TOOL_CALL_LOG
 
 class FakeChatModel:
     """Stands in for ChatLiteLLM. Returns responses from a scripted queue,
-    one per .invoke() call, and records every message list it was given."""
+    one per .invoke() call, and records every message list it was given.
+    Also records the tools it was bound with, so tests can assert on WHICH
+    tools were made available for a given customer_ref (e.g. whether
+    note_customer_preference was included) without needing bind_tools to
+    actually do anything."""
 
     def __init__(self, responses: list[AIMessage]):
         self._responses = list(responses)
         self.invocations: list[list] = []
+        self.bound_tools: list = []
 
     def bind_tools(self, tools):
+        self.bound_tools = list(tools)
         return self  # tool binding is a no-op for the fake -- return self so .invoke still works
 
     def invoke(self, messages):
@@ -42,6 +57,30 @@ class FakeChatModel:
                 f"the loop asked for more turns than the test scripted."
             )
         return self._responses.pop(0)
+
+
+class FakeMemory:
+    """Minimal stand-in for memory.customer_memory.CustomerMemory -- only the
+    two methods the agent loop and the memory tool actually call. Doesn't
+    touch Supermemory at all, matching how test_tools.py/test_agent.py never
+    hit real external services for the M2 tools either.
+
+    context_block: what get_context_block() returns -- "" (default) means
+    "no known history", matching CustomerMemory's real default for a new
+    customer.
+    """
+
+    def __init__(self, context_block: str = ""):
+        self._context_block = context_block
+        self.get_context_block_calls: list[tuple[str, str]] = []
+        self.preferences_written: list[tuple[str, str, dict]] = []
+
+    def get_context_block(self, customer_ref: str, query: str, k: int = 3) -> str:
+        self.get_context_block_calls.append((customer_ref, query))
+        return self._context_block
+
+    def remember_preference(self, customer_ref: str, fact: str, **extra) -> None:
+        self.preferences_written.append((customer_ref, fact, extra))
 
 
 def install_fake_llm(monkeypatch, responses: list[AIMessage]) -> FakeChatModel:
@@ -68,6 +107,11 @@ SAMPLE_TICKET = {
     "raw_text": "My order arrived damaged, please refund me.",
 }
 
+# Matches the customer_ref in patch_order_lookup_data's fixture data below --
+# kept consistent so tests reflect a realistic order/customer pairing, even
+# though FakeMemory itself doesn't care about real customer data.
+SAMPLE_CUSTOMER_REF = "KW-C-TEST01"
+
 
 def patch_order_lookup_data(monkeypatch, order_ref="KW-O-TEST01"):
     order = {
@@ -90,7 +134,7 @@ class TestRunSupportAgent:
     def test_resolves_immediately_when_no_tool_calls(self, monkeypatch):
         install_fake_llm(monkeypatch, [AIMessage(content="Thanks, here's your answer.")])
 
-        result = run_support_agent(SAMPLE_TICKET)
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
 
         assert result["resolution_status"] == "resolved"
         assert result["final_answer"] == "Thanks, here's your answer."
@@ -106,7 +150,7 @@ class TestRunSupportAgent:
             AIMessage(content="Your order was delivered on time."),
         ])
 
-        result = run_support_agent(SAMPLE_TICKET)
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
 
         assert result["resolution_status"] == "resolved"
         assert result["iterations_used"] == 2
@@ -135,7 +179,7 @@ class TestRunSupportAgent:
         })
         monkeypatch.setattr("tools.refund_calculator.shipments_by_order_ref", lambda: {})
 
-        result = run_support_agent(SAMPLE_TICKET)
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
 
         assert result["iterations_used"] == 2  # both calls happened in ONE model turn
         assert len(result["tool_calls_made"]) == 2
@@ -156,7 +200,7 @@ class TestRunSupportAgent:
             AIMessage(content="I ran into an issue looking that up, escalating to a human."),
         ])
 
-        result = run_support_agent(SAMPLE_TICKET)  # must not raise
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())  # must not raise
 
         assert result["resolution_status"] == "resolved"
         assert "escalating" in result["final_answer"].lower()
@@ -164,9 +208,11 @@ class TestRunSupportAgent:
         assert any("error" in tc for tc in result["tool_calls_made"])
 
     def test_unknown_tool_name_does_not_crash_the_run(self, monkeypatch):
-        """Regression test for a real bug found during review: TOOLS_BY_NAME[name]
+        """Regression test for a real bug found during M2 review: TOOLS_BY_NAME[name]
         was originally outside the try/except, so a hallucinated tool name would
-        raise an uncaught KeyError and crash run_support_agent entirely."""
+        raise an uncaught KeyError and crash run_support_agent entirely. M3 adds a
+        fifth possible tool name (note_customer_preference); this still covers a
+        name that matches none of the five."""
         install_fake_llm(monkeypatch, [
             AIMessage(content="", tool_calls=[
                 {"name": "this_tool_does_not_exist", "args": {}, "id": "call_1"}
@@ -174,7 +220,7 @@ class TestRunSupportAgent:
             AIMessage(content="Recovered gracefully."),
         ])
 
-        result = run_support_agent(SAMPLE_TICKET)  # must not raise KeyError
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())  # must not raise KeyError
 
         assert result["resolution_status"] == "resolved"
         assert result["final_answer"] == "Recovered gracefully."
@@ -190,7 +236,7 @@ class TestRunSupportAgent:
         ]
         install_fake_llm(monkeypatch, responses)
 
-        result = run_support_agent(SAMPLE_TICKET, max_iterations=6)
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory(), max_iterations=6)
 
         assert result["resolution_status"] == "max_iterations_exceeded"
         assert result["final_answer"] is None
@@ -207,7 +253,7 @@ class TestRunSupportAgent:
         ]
         install_fake_llm(monkeypatch, responses)
 
-        result = run_support_agent(SAMPLE_TICKET, max_iterations=3)
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory(), max_iterations=3)
 
         assert result["resolution_status"] == "max_iterations_exceeded"
         assert result["iterations_used"] == 3
@@ -220,11 +266,11 @@ class TestRunSupportAgent:
             ]),
             AIMessage(content="First run done."),
         ])
-        first_result = run_support_agent(SAMPLE_TICKET)
+        first_result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
         assert len(first_result["tool_calls_made"]) == 1
 
         install_fake_llm(monkeypatch, [AIMessage(content="Second run, no tools needed.")])
-        second_result = run_support_agent(SAMPLE_TICKET)
+        second_result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
 
         assert second_result["tool_calls_made"] == []  # not carrying over the first run's call
 
@@ -234,10 +280,90 @@ class TestRunSupportAgent:
         concern), just that support_agent wires it in correctly."""
         fake = install_fake_llm(monkeypatch, [AIMessage(content="Acknowledged.")])
 
-        run_support_agent(SAMPLE_TICKET)
+        run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
 
         first_call_messages = fake.invocations[0]
         human_message_content = first_call_messages[1].content  # [0]=system, [1]=human
         assert SAMPLE_TICKET["order_id"] in human_message_content
         assert SAMPLE_TICKET["raw_text"] in human_message_content
         assert "UNTRUSTED" in human_message_content
+
+
+class TestM3MemoryIntegration:
+    """New for M3: the memory tool's availability/scoping, and the customer
+    history block actually reaching the model. Deliberately separate from
+    TestRunSupportAgent so it's obvious at a glance which coverage is M2's
+    loop behavior vs. what M3 added on top of it."""
+
+    def test_customer_context_block_reaches_the_model(self, monkeypatch):
+        fake = install_fake_llm(monkeypatch, [AIMessage(content="Acknowledged.")])
+        memory = FakeMemory(context_block="Known customer history:\n- [semantic] Prefers replacement over refund.")
+
+        run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, memory)
+
+        human_message_content = fake.invocations[0][1].content
+        assert "Prefers replacement over refund." in human_message_content
+        assert "known customer history" in human_message_content.lower()
+        # confirms get_context_block was actually called with THIS ticket's
+        # customer_ref and raw_text, not defaulted/hardcoded somewhere
+        assert memory.get_context_block_calls == [(SAMPLE_CUSTOMER_REF, SAMPLE_TICKET["raw_text"])]
+
+    def test_no_history_block_when_customer_has_none(self, monkeypatch):
+        """FakeMemory()'s default context_block="" mirrors a brand-new
+        customer -- confirms the empty case doesn't leave a stray labeled
+        section with nothing in it."""
+        fake = install_fake_llm(monkeypatch, [AIMessage(content="Acknowledged.")])
+
+        run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
+
+        human_message_content = fake.invocations[0][1].content
+        assert "known customer history" not in human_message_content.lower()
+
+    def test_note_customer_preference_tool_available_when_customer_resolved(self, monkeypatch):
+        fake = install_fake_llm(monkeypatch, [AIMessage(content="Acknowledged.")])
+
+        run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, FakeMemory())
+
+        tool_names = {t.name for t in fake.bound_tools}
+        assert "note_customer_preference" in tool_names
+        assert len(fake.bound_tools) == 5  # the four M2 tools + this one
+
+    def test_note_customer_preference_tool_absent_when_customer_ref_is_none(self, monkeypatch):
+        """M3's graceful-degradation case: a ticket with no resolvable
+        customer_ref (e.g. missing order_id) still runs, just without the
+        memory tool -- and must never call into memory at all, since there's
+        no namespace to scope a call to."""
+        fake = install_fake_llm(monkeypatch, [AIMessage(content="Acknowledged.")])
+        memory = FakeMemory()
+
+        result = run_support_agent(SAMPLE_TICKET, None, memory)
+
+        tool_names = {t.name for t in fake.bound_tools}
+        assert "note_customer_preference" not in tool_names
+        assert len(fake.bound_tools) == 4  # only the M2 tools
+        assert memory.get_context_block_calls == []  # never called with customer_ref=None
+        assert result["resolution_status"] == "resolved"  # ticket still runs to completion
+
+    def test_agent_calling_note_customer_preference_writes_to_the_right_customer(self, monkeypatch):
+        install_fake_llm(monkeypatch, [
+            AIMessage(content="", tool_calls=[
+                {"name": "note_customer_preference",
+                 "args": {"fact": "Prefers replacement over refund."},
+                 "id": "call_1"}
+            ]),
+            AIMessage(content="Noted your preference for next time."),
+        ])
+        memory = FakeMemory()
+
+        result = run_support_agent(SAMPLE_TICKET, SAMPLE_CUSTOMER_REF, memory)
+
+        assert result["resolution_status"] == "resolved"
+        assert len(memory.preferences_written) == 1
+        written_customer_ref, fact, extra = memory.preferences_written[0]
+        # the model was NEVER given a customer_ref argument to supply (see
+        # tools/customer_memory_tool.py) -- this confirms the closure bound
+        # it correctly to THIS ticket's customer, not something model-supplied
+        assert written_customer_ref == SAMPLE_CUSTOMER_REF
+        assert fact == "Prefers replacement over refund."
+        assert extra.get("source_ticket_id") == SAMPLE_TICKET["ticket_id"]
+        assert any(tc["tool"] == "note_customer_preference" for tc in result["tool_calls_made"])

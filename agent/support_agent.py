@@ -16,6 +16,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import tool
 
 from agent.prompts import SYSTEM_PROMPT, format_ticket_for_agent
+from memory.customer_memory import CustomerMemory
+from tools.customer_memory_tool import build_customer_memory_tool
 from tools.order_lookup import order_lookup
 from tools.refund_calculator import calculate_refund
 from tools.refund_replace import process_refund
@@ -68,6 +70,32 @@ TOOLS = [order_lookup_tool, track_shipment_tool, calculate_refund_tool, process_
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
+def build_tools(customer_ref: str | None, memory: CustomerMemory, ticket_id: str | None = None):
+    """
+    M3 addition. The four tools above are stateless and stay module-level as-is.
+    note_customer_preference is different: customer_ref must be bound via closure
+    at tool-build time so the model can never supply (or misdirect) which
+    customer's memory namespace gets written to -- see
+    tools/customer_memory_tool.py's docstring for the full reasoning.
+
+    customer_ref is Optional: some tickets have no order_id (a known, expected
+    case M1's schema anticipated -- see SYSTEM_PROMPT rule 1), so there's
+    nothing to resolve a customer from. When customer_ref is None, the memory
+    tool is simply not built -- the agent still runs with the four M2 tools
+    and handles the ticket normally (e.g. asks for the missing order ID);
+    it just can't read or write this customer's history.
+
+    Called once per ticket in run_support_agent, not at import time.
+    """
+    if customer_ref:
+        memory_tool = build_customer_memory_tool(customer_ref, memory, ticket_id=ticket_id)
+        tools = TOOLS + [memory_tool]
+    else:
+        tools = list(TOOLS)
+    tools_by_name = {t.name: t for t in tools}
+    return tools, tools_by_name
+
+
 def _resolve_model() -> str:
     """
     Mirrors core/llm_client.py's provider switch: LLM_PROVIDER picks which
@@ -99,9 +127,23 @@ def _get_llm():
     return ChatLiteLLM(model=_resolve_model(), max_retries=5)
 
 
-def run_support_agent(ticket: dict, max_iterations: int = MAX_ITERATIONS) -> dict[str, Any]:
+def run_support_agent(
+    ticket: dict,
+    customer_ref: str | None,
+    memory: CustomerMemory,
+    max_iterations: int = MAX_ITERATIONS,
+) -> dict[str, Any]:
     """
     Run the tool-calling loop for a single SupportTicket.
+
+    M3: customer_ref is Optional -- None when the ticket has no order_id to
+    resolve a customer from (a known case, not an error; see SYSTEM_PROMPT
+    rule 1). In that case the ticket still runs, just without
+    note_customer_preference and without a memory context block -- the agent
+    falls back to M2's existing "ask for the missing order ID" behavior.
+    This function does NOT write the episodic ticket summary back to memory
+    either way -- that happens deterministically in scripts/run_agent.py
+    after this returns, and only when customer_ref is resolved.
 
     Returns:
         {final_answer, tool_calls_made: [...], resolution_status, iterations_used}
@@ -109,11 +151,16 @@ def run_support_agent(ticket: dict, max_iterations: int = MAX_ITERATIONS) -> dic
         or 'max_iterations_exceeded' if it hit the cap without one.
     """
     clear_log()
-    llm = _get_llm().bind_tools(TOOLS)
+    tools, tools_by_name = build_tools(customer_ref, memory, ticket_id=ticket.get("ticket_id"))
+    llm = _get_llm().bind_tools(tools)
 
+    context_block = (
+        memory.get_context_block(customer_ref, ticket.get("raw_text", ""))
+        if customer_ref else ""
+    )
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=format_ticket_for_agent(ticket)),
+        HumanMessage(content=format_ticket_for_agent(ticket, customer_context=context_block)),
     ]
 
     for i in range(max_iterations):
@@ -130,7 +177,7 @@ def run_support_agent(ticket: dict, max_iterations: int = MAX_ITERATIONS) -> dic
 
         for tc in ai_msg.tool_calls:
             try:
-                tool_fn = TOOLS_BY_NAME[tc["name"]]
+                tool_fn = tools_by_name[tc["name"]]
                 result = tool_fn.invoke(tc["args"])
             except Exception as e:
                 result = {"error": str(e)}

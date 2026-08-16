@@ -7,6 +7,19 @@ running records.jsonl through parse_ticket_safe() first means a bad M1 parse
 here as a bad agent run, which is exactly the failure mode you want this
 script to surface before M8's formal eval.
 
+M3 addition: before the agent runs, this script attempts to resolve the
+ticket's customer_ref via order_lookup. This is best-effort, not a gate --
+a missing order_id is a known, expected case (M1's schema anticipated it;
+M2's SYSTEM_PROMPT rule 1 already handles it), so resolution failure just
+means this one ticket runs without memory features, not that it's skipped.
+A CustomerMemory instance is constructed once and passed into every
+run_support_agent call. After the agent returns, this script -- not the
+agent -- deterministically writes the episodic ticket summary back to
+memory whenever a customer WAS resolved, regardless of what the agent chose
+to do with note_customer_preference. Episodic write-back is not optional
+when a customer_ref exists; semantic (note_customer_preference) is
+agent-judged, inside the agent loop.
+
 Usage:
     python scripts/run_agent.py                          # full batch
     python scripts/run_agent.py --limit 10                # first 10 tickets
@@ -19,7 +32,9 @@ leaks ground truth into what should be inferred, and contains_suspicious_
 instructions is never set (ground_truth doesn't carry it), so injection-
 handling can't be exercised this way. Use it only to iterate quickly on
 agent/tool logic without spending LLM calls on the parse step; never use it
-for anything you'd report as a real pipeline result.
+for anything you'd report as a real pipeline result. Customer resolution and
+memory read/write still run in this mode -- SUPERMEMORY_API_KEY is required
+even with --skip-parse.
 """
 from __future__ import annotations
 
@@ -40,6 +55,9 @@ except ImportError:
     pass  # python-dotenv not installed -- fine if env vars are set another way
 
 from agent.support_agent import run_support_agent
+from memory.customer_memory import CustomerMemory
+from tools.order_lookup import order_lookup
+from tools.reliability import make_robust_tool
 
 DEFAULT_INPUT = Path("data/intake/records.jsonl")
 DEFAULT_OUTPUT = Path("outputs/agent_run_results.json")
@@ -113,6 +131,55 @@ def build_from_ground_truth(record: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# M3: customer resolution -- prefer the record's own customer_ref (known
+# intake metadata), falling back to order_lookup on the LLM-parsed order_id
+# only if the record doesn't carry one. Best-effort, not a gate: an
+# unresolvable ticket still runs, just with memory features unavailable --
+# see resolve_customer_ref's docstring for why record.customer_ref is the
+# right primary source, not ticket_dict["order_id"].
+# ---------------------------------------------------------------------------
+
+_robust_order_lookup_for_resolution = make_robust_tool(order_lookup, "order_lookup_customer_resolution")
+
+
+def resolve_customer_ref(record: dict, ticket_dict: dict) -> tuple[str | None, str | None]:
+    """
+    Prefer the record's own customer_ref. records.jsonl carries this at the
+    TOP LEVEL of each record (sibling to raw_text and ground_truth) -- unlike
+    ground_truth's intent/category/sentiment/requires_human (M1: "intentionally
+    not fed to the parser... reserved for M8"), this is known ticket-intake
+    metadata, the way a real support system knows who filed a ticket from
+    their account/session, independent of whether their message happens to
+    mention an order number. SupportTicket.order_id, by contrast, is
+    LLM-inferred from raw_text alone -- it's what the CUSTOMER claimed/typed,
+    which is frequently absent even when the ticket is unambiguously tied to
+    a real order and customer (e.g. SHOPSENSE-00002's raw_text never states
+    an order number, but the record's order_ref/customer_ref are populated).
+
+    Only falls back to order_lookup (via ticket_dict's LLM-parsed order_id)
+    if the record itself has no customer_ref -- e.g. a differently-shaped
+    future record source, or a genuinely unidentified/guest ticket.
+
+    Returns (customer_ref, warning) -- warning is None on success.
+    """
+    customer_ref = record.get("customer_ref")
+    if customer_ref:
+        return customer_ref, None
+
+    order_id = ticket_dict.get("order_id")
+    if not order_id:
+        return None, "no customer_ref on record and no order_id on ticket -- cannot resolve"
+    try:
+        order = _robust_order_lookup_for_resolution(order_id)
+    except Exception as e:
+        return None, f"order_lookup fallback failed: {e}"
+    customer_ref = order.get("customer_ref") if isinstance(order, dict) else None
+    if not customer_ref:
+        return None, f"order_lookup fallback returned no customer_ref for order_id={order_id}"
+    return customer_ref, None
+
+
+# ---------------------------------------------------------------------------
 # Main batch loop
 # ---------------------------------------------------------------------------
 
@@ -143,6 +210,8 @@ def run_batch(
         from core.llm_client import LLMClient
         client = LLMClient()
 
+    memory = CustomerMemory()
+
     print(f"Processing {len(records)} ticket(s){' [SKIP-PARSE DEV MODE]' if skip_parse else ''}...\n")
 
     results: list[dict] = []
@@ -168,7 +237,13 @@ def run_batch(
                 })
                 continue
 
-            agent_result = run_support_agent(ticket_dict, max_iterations=max_iterations)
+            customer_ref, resolve_warning = resolve_customer_ref(record, ticket_dict)
+            if customer_ref is None:
+                print(f"    [no customer memory this run] {resolve_warning}")
+
+            agent_result = run_support_agent(
+                ticket_dict, customer_ref, memory, max_iterations=max_iterations
+            )
             elapsed = time.time() - started
 
             print(
@@ -178,9 +253,46 @@ def run_batch(
                 f"{elapsed:.1f}s"
             )
 
+            # Deterministic episodic write-back -- fires regardless of what the
+            # agent did or didn't do with note_customer_preference (that's
+            # semantic, agent-judged, inside the loop). This is NOT optional
+            # when a customer was resolved: every such ticket becomes one
+            # memory note. When customer_ref is None (no order_id, or
+            # order_lookup couldn't resolve one) there's no namespace to write
+            # to, so this is skipped rather than forced -- same as the agent
+            # itself skipping note_customer_preference in that case. A write
+            # failure is logged and swallowed, not raised -- memory write-back
+            # is a secondary concern and must never take down the batch, same
+            # philosophy as tool-call errors being caught and fed back rather
+            # than crashing the agent loop.
+            if customer_ref:
+                resolution_note = agent_result["final_answer"] or (
+                    f"Ticket ended with status '{agent_result['resolution_status']}' "
+                    "without a final answer."
+                )
+                try:
+                    summary = memory.summarize_ticket(
+                        raw_text=ticket_dict.get("raw_text", ""),
+                        issue_type=ticket_dict.get("issue_type", "unknown"),
+                        resolution=resolution_note,
+                    )
+                    print(customer_ref)
+                    print(ticket_id)
+                    print(summary)
+                    memory.remember_ticket(
+                        customer_ref=customer_ref,
+                        ticket_id=ticket_id,
+                        summary=summary,
+                        date=time.strftime("%Y-%m-%d"),
+                    )
+                except Exception as e:
+                    print(f"    [memory write-back failed, continuing] {e}")
+
             results.append({
                 "record_id": record_id, "ticket_id": ticket_id,
                 "stage": "agent", "status": agent_result["resolution_status"],
+                "customer_ref": customer_ref,
+                "customer_resolution_warning": resolve_warning,
                 "order_id": ticket_dict.get("order_id"),
                 "issue_type": ticket_dict.get("issue_type"),
                 "final_answer": agent_result["final_answer"],
@@ -237,6 +349,15 @@ def print_summary(results: list[dict], output_path: Path) -> None:
 
 
 def main():
+
+    """
+    M2.1 Place to pass query and record the output
+    M3.1 This also triggers supermemory and saved in memory
+    python scripts/run_agent.py                          # full batch
+    python scripts/run_agent.py --limit 10                # first 10 tickets
+    python scripts/run_agent.py --record-id SHOPSENSE-00004  # one ticket
+    python scripts/run_agent.py --skip-parse --limit 20   # agent-only, dev iteration
+    """
     p = argparse.ArgumentParser(description="Run ShopSense tickets through the M1 parser + M2 agent end to end.")
     p.add_argument("--input", type=Path, default=DEFAULT_INPUT, help=f"Path to records.jsonl (default: {DEFAULT_INPUT})")
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help=f"Path to write results JSON (default: {DEFAULT_OUTPUT})")

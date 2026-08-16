@@ -4,11 +4,13 @@
     "ticket_id": "KW-T-000001",
     "stage": "agent",
     "status": "resolved",
+    "customer_ref": "KW-C-00001",
+    "customer_resolution_warning": null,
     "order_id": "KW-O-000001",
     "issue_type": "track_order",
-    "final_answer": "I have checked the tracking status for your order (KW-O-000001). The shipment appears to be delayed in transit with our carrier, Bluedart. \n\nI'm sorry for the inconvenience this delay has caused. Because the order is currently marked as in transit rather than delivered, our standard refund policy cannot automatically process a return at this moment. However, I have logged the transit delay on your account. \n\nPlease allow us a little more time while we look into the delivery status with the courier. If you have any further questions or if it does not arrive soon, please let us know.",
-    "iterations_used": 5,
-    "tool_call_count": 4,
+    "final_answer": "I have checked the status of your shipment for order KW-O-000001 with our delivery partner, Bluedart. \n\nAccording to the latest tracking updates, the shipment has unfortunately been marked as lost in transit. I'm very sorry for the inconvenience this has caused. Because of the significant delay, this qualifies for a delay compensation of 50%. \n\nI am escalating this case so our team can process an appropriate resolution for you. You can expect to hear back from us shortly regarding the next steps.",
+    "iterations_used": 2,
+    "tool_call_count": 1,
     "tool_calls_made": [
       {
         "tool": "track_shipment",
@@ -16,7 +18,7 @@
           "KW-O-000001"
         ],
         "kwargs": {},
-        "ts": 1786850918.258815,
+        "ts": 1786893438.4025228,
         "result": {
           "found": true,
           "order_ref": "KW-O-000001",
@@ -32,84 +34,21 @@
           "delay_compensation_pct": 0.5,
           "is_lost_in_transit": true
         }
-      },
-      {
-        "tool": "order_lookup",
-        "args": [
-          "KW-O-000001"
-        ],
-        "kwargs": {},
-        "ts": 1786850919.054213,
-        "result": {
-          "found": true,
-          "order_ref": "KW-O-000001",
-          "customer_ref": "KW-C-00172",
-          "customer_tier": "standard",
-          "sku": "KW-SKU-000158",
-          "product_title": "Gainsboro Method Home & Kitchen",
-          "product_category": "Home & Kitchen",
-          "quantity": 1,
-          "order_value_inr": 12999,
-          "placed_at": "2025-09-28T05:04",
-          "payment_method": "upi",
-          "status": "placed",
-          "delivery_promise_days": 3,
-          "actual_delivery_days": 3
-        }
-      },
-      {
-        "tool": "calculate_refund",
-        "args": [
-          "KW-O-000001"
-        ],
-        "kwargs": {
-          "condition": "unopened"
-        },
-        "ts": 1786850919.833123,
-        "result": {
-          "found": true,
-          "order_ref": "KW-O-000001",
-          "eligible": false,
-          "eligible_amount_inr": 0,
-          "refund_pct": 0.0,
-          "category": "Home & Kitchen",
-          "reason": "Order status is 'placed', not 'delivered' \u2014 not yet eligible for return."
-        }
-      },
-      {
-        "tool": "process_refund",
-        "args": [
-          "KW-O-000001",
-          "refund",
-          12999,
-          "lost_in_transit"
-        ],
-        "kwargs": {
-          "condition": "unopened",
-          "safety_or_legal_concern": false
-        },
-        "ts": 1786850920.844712,
-        "result": {
-          "status": "denied",
-          "order_ref": "KW-O-000001",
-          "requested_amount_inr": 12999,
-          "eligible_amount_inr": 0,
-          "reason": "Order status is 'placed', not 'delivered' \u2014 not yet eligible for return.",
-          "requires_human": false
-        }
       }
     ],
     "parse_errors": [],
-    "elapsed_seconds": 7.61
+    "elapsed_seconds": 5.03
   },
   {
     "record_id": "SHOPSENSE-00002",
     "ticket_id": "KW-T-000002",
     "stage": "agent",
     "status": "resolved",
+    "customer_ref": "KW-C-00002",
+    "customer_resolution_warning": null,
     "order_id": "KW-O-000002",
     "issue_type": "wrong_item",
-    "final_answer": "I'm sorry for the inconvenience you experienced with your order. \n\nI have looked into your order (KW-O-000002) for the item \"DarkGreen Not Grocerie\". According to our return and refund policy, grocery items are non-returnable and non-refundable, and as a result, the replacement/refund request could not be automatically approved. \n\nIf you believe there was an error or need further assistance, please let us know.",
+    "final_answer": "I'm sorry for the inconvenience you've experienced with your recent order. \n\nI have looked into order KW-O-000002. Under our return and refund policy, items in the groceries category are non-returnable and non-refundable, which means we are unable to process a refund or replacement for this item. \n\nIf you have any other questions or need further assistance with your account, please let us know.",
     "iterations_used": 4,
     "tool_call_count": 3,
     "tool_calls_made": [
@@ -119,7 +58,7 @@
           "KW-O-000002"
         ],
         "kwargs": {},
-        "ts": 1786850924.175345,
+        "ts": 1786893453.4094021,
         "result": {
           "found": true,
           "order_ref": "KW-O-000002",
@@ -145,7 +84,7 @@
         "kwargs": {
           "condition": "unopened"
         },
-        "ts": 1786850925.056177,
+        "ts": 1786893454.6066308,
         "result": {
           "found": true,
           "order_ref": "KW-O-000002",
@@ -168,7 +107,7 @@
           "condition": "unopened",
           "safety_or_legal_concern": false
         },
-        "ts": 1786850925.846783,
+        "ts": 1786893455.58664,
         "result": {
           "status": "denied",
           "order_ref": "KW-O-000002",
@@ -180,6 +119,6 @@
       }
     ],
     "parse_errors": [],
-    "elapsed_seconds": 4.01
+    "elapsed_seconds": 8.68
   }
 ]

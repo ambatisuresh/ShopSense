@@ -69,3 +69,16 @@ langgraph>=1.2,<2.0
 #                                  pause.py / _resume.py) and for tests/test_workflow/
 #                                  test_checkpointing_sqlite.py to run instead of skip.
 langgraph-checkpoint-sqlite>=3.0,<4.0
+
+# The MCP client (used by scripts/run_mcp_server_selfcheck.py and
+# tests/test_team/test_mcp_server.py to talk to the server over real stdio
+# JSON-RPC: ClientSession, StdioServerParameters, stdio_client).
+mcp>=1.2
+ 
+# The MCP server (mcp_server/contract_server.py) needs FastMCP. Confirmed on
+# a real machine: some `mcp` package versions are client-only and do NOT
+# bundle mcp.server.fastmcp (contract_server.py's ImportError fallback to
+# mcp.server.fastmcp then also fails) -- the standalone `fastmcp` package is
+# what's actually needed in that case, so it's listed explicitly here rather
+# than left as only a fallback import.
+fastmcp

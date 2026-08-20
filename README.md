@@ -18,7 +18,12 @@ emotional cases to human agents.
 - **Orchestration:** LangChain (M2's single-agent tool-calling loop) →
   LangGraph (M5's ticket-review workflow — conditional routing, real
   `interrupt()`-based human-in-the-loop approval, durable SQLite
-  checkpointing; multi-agent orchestration is M6)
+  checkpointing) → LangGraph supervisor-star multi-agent team (M6's
+  contract-review team — scoped specialist agents, deterministic routing,
+  a bounded revision/escalation loop)
+- **Multi-agent protocol:** MCP (Model Context Protocol) — a sandboxed
+  `FastMCP` server exposes the vendor contract repository (read-only) to
+  the M6 team, see M6
 
 ## Milestones
 | # | Milestone | Status |
@@ -28,9 +33,77 @@ emotional cases to human agents.
 | M3 | Persistent memory + semantic index | ✅ Completed |
 | M4 | Production RAG + evaluation baseline | ✅ Completed |
 | M5 | Orchestrated LangGraph workflow with checkpointing | ✅ Completed |
-| M6 | Multi-agent team + MCP integration | ⬜ Not started |
+| M6 | Multi-agent team + MCP integration | ✅ Completed |
 | M7 | Observability + reliability hardening | ⬜ Not started |
 | M8 | End-to-end evaluation, guardrails & deployment | ⬜ Not started |
+
+> **M6 note:** a second, independent multi-agent system — a contract-review
+> team (Extraction → Playbook RAG → Redline Drafter → Legal Reviewer),
+> star-topology-routed by a deterministic Supervisor, over a 4-contract
+> vendor corpus reviewed against a 23-clause negotiation playbook that's
+> deliberately cross-referenced against the same 5 policy docs M4's RAG
+> corpus already contains (including one intentional, never-resolved
+> USD-vs-INR refund-ceiling conflict carried forward from M2/M4/M5, now
+> forced into an executable contract clause). Built in 10 steps:
+> - **Corpus, state, scopes (Steps 1–2):** the 4-contract + playbook corpus;
+>   `team/state.py`'s `ContractReviewState` (control-vs-audit field split,
+>   same principle as `workflow/state.py`'s M5 split) and `MAX_REVISIONS = 2`;
+>   `team/scopes.py`'s `AGENT_SCOPES` + `scoped()` write-permission decorator
+>   (handles both sync and async node functions — needed once Step 10 makes
+>   two nodes async).
+> - **The four specialists (Steps 3–6):** `extraction_node` (clause
+>   splitting + classification against a 23-entry taxonomy),
+>   `playbook_rag_node` (BM25 retrieval of the playbook position + backing
+>   policy passages per clause), `redline_drafter_node` (numeric/keyword
+>   compliance assessment + redline composition, with a bounded
+>   revision-redraft phase), `legal_reviewer_node` (named-escalation rule →
+>   revision-cap check → LLM-or-keyword adequacy review). Every node follows
+>   the same "let the model produce, let deterministic code decide" shape
+>   used throughout this project — an LLM call is always attempted first and
+>   always has a deterministic fallback.
+> - **Supervisor + escalation (Step 7):** `team/nodes/supervisor.py`'s
+>   `decide_next_agent()` is a pure `state -> str` router — deliberately NOT
+>   an LLM call, since this control-flow decision has objectively correct
+>   answers. `team/nodes/escalate.py` stamps the terminal
+>   `escalated_to_human` status. A real bug (revision budget overshoot: 5
+>   simultaneous rejections drove `revision_count` to 6 against a cap of 2)
+>   was caught via a forced-rejection test and fixed with a cap check before
+>   any redraft.
+> - **Real LangGraph wiring (Step 8):** `team/graph.py`'s `build_team()` —
+>   a star topology (`START → supervisor → {specialist|escalate|END}`, every
+>   specialist edging back to `supervisor`), `add_conditional_edges` routing
+>   on `next_agent`. Renamed to `scripts/run_team_graph.py` in this combined
+>   repo to avoid colliding with M5's existing `scripts/run_graph.py`.
+> - **MCP contract-repository server (Step 9):** `mcp_server/contract_server.py`
+>   — a `FastMCP` server exposing `list_contracts`/`read_contract` tools plus
+>   a `contracts://playbook/negotiation` resource, sandboxed by a 4-layer
+>   `_safe_path()` boundary (bare-filename rule, `resolve()`,
+>   `is_relative_to()`, symlink refusal). Read-only by design — no
+>   write/delete tool exists at all (the e-signature/write-back flow was
+>   dropped from M6's scope early on). Verified against a real subprocess
+>   over real stdio JSON-RPC, not a mock.
+> - **Wire the team to MCP (Step 10):** `extraction_node` and
+>   `playbook_rag_node` become `async def` and fetch contract text / the
+>   negotiation playbook through the MCP server instead of local disk —
+>   the actual "swap the data-access layer, nothing else changes" deliverable.
+>   `team/mcp_client.py` holds the two client-side helpers (per-call session,
+>   not persistent — appropriate for this stateless, cheap-to-spawn server).
+>
+> Test suite: `tests/test_team/` (10 files) — **227 passed** independent of
+> `langgraph`/`mcp`/`fastmcp` availability (every LLM path and every MCP
+> fetch path is either hermetically stubbed or has its own
+> `pytest.importorskip`-guarded dedicated integration test), **plus 8
+> further tests in `test_graph.py`** (gated behind
+> `pytest.importorskip("langgraph")`) confirmed passing on a real machine
+> with `langgraph` + `mcp`/`fastmcp` installed — the real compiled
+> `StateGraph`, driven by `await team.ainvoke(...)`, running against the
+> real MCP server subprocess end to end for all 4 contracts. Several real
+> bugs were caught and fixed along the way, including two environment-only
+> ones that only a genuine live run surfaced: a missing `fastmcp` install
+> (the server now tries `from fastmcp import FastMCP` first, falling back to
+> `mcp.server.fastmcp`) and a stale `team.invoke()` call in the graph test
+> helper left over from before Step 10 made two nodes async (fixed to
+> `await team.ainvoke(...)`).
 
 > **M5 note:** LangGraph ticket-review workflow — `extract` (M1 parser
 > adapter) → `compare_to_playbook` (refund-cap + escalation-tone policy
@@ -202,6 +275,27 @@ shopsense/
 │   ├── records_loader.py          # load_records()/unique_id() — records.jsonl loading, dedup-safe thread ids
 │   ├── checklist.py                # pass/fail structural checks for a full batch run (Step 9)
 │   └── visualize.py                # terminal-friendly graph picture (writes PNG / prints Mermaid source)
+├── team/                     # [M6] LangGraph supervisor-star contract-review team
+│   ├── state.py                 # ContractReviewState — control fields vs Annotated[list, add] audit fields
+│   ├── scopes.py                 # AGENT_SCOPES + scoped() — write-permission decorator, sync+async aware
+│   ├── parsing.py                 # split_into_clauses() — clause_id/title/body split
+│   ├── taxonomy.py                 # 23-entry clause_type taxonomy + deterministic fallback classifier
+│   ├── playbook_index.py            # parse_playbook_positions(text) + local-disk load_playbook_positions()
+│   ├── policy_corpus.py              # loads the M4 policy corpus for playbook-position grounding
+│   ├── bm25.py                        # BM25 retrieval used by Playbook RAG
+│   ├── compliance.py                   # numeric + keyword clause-vs-playbook compliance assessment
+│   ├── mcp_client.py                    # read_contract_via_mcp() / read_playbook_via_mcp() — MCP client helpers (Step 10)
+│   ├── graph.py                          # build_team() — real langgraph StateGraph, star topology (Step 8)
+│   └── nodes/
+│       ├── extraction.py                  # async, MCP-backed (Step 10): contract text -> classified clauses
+│       ├── playbook_rag.py                # async, MCP-backed (Step 10): per-clause playbook + policy retrieval
+│       ├── redline_drafter.py             # compliance assessment + redline composition + bounded revision phase
+│       ├── legal_reviewer.py              # named-escalation -> revision-cap -> LLM/keyword adequacy review
+│       ├── supervisor.py                  # decide_next_agent() — pure state -> str routing policy
+│       └── escalate.py                    # terminal escalated_to_human status
+├── mcp_server/                # [M6] Step 9
+│   └── contract_server.py       # FastMCP server: list_contracts/read_contract tools + negotiation-playbook
+│                                  # resource, sandboxed via 4-layer _safe_path() (no write/delete tool at all)
 ├── scripts/
 │   ├── verify_llm_client.py   # smoke test for LLMClient.complete()
 │   ├── run_intake.py          # batch runner: reads records.jsonl, parses each ticket
@@ -225,7 +319,16 @@ shopsense/
 │   ├── show_graph.py               # [M5] demo: just show the graph picture (PNG or Mermaid text)
 │   ├── run_checkpointing_pause.py  # [M5] Step 8 demo pt.1: start a durable run, pause it — run as its own process
 │   ├── run_checkpointing_resume.py # [M5] Step 8 demo pt.2: reattach in a NEW process, resume, finalize
-│   └── run_workflow.py             # [M5] Step 9: full batch run vs records.jsonl + pass/fail checklist
+│   ├── run_workflow.py             # [M5] Step 9: full batch run vs records.jsonl + pass/fail checklist
+│   ├── run_extraction.py            # [M6] demo: extraction_node against all 4 contracts
+│   ├── run_playbook_rag.py          # [M6] demo: extraction -> playbook_rag, one clause per call
+│   ├── run_redline_drafter.py       # [M6] demo: extraction -> playbook_rag -> redline_drafter
+│   ├── run_legal_reviewer.py        # [M6] demo: full 4-node pipeline, one draft entry per call
+│   ├── run_supervisor.py            # [M6] demo: manual supervisor-driven loop, no langgraph needed
+│   ├── run_team_graph.py            # [M6] demo: the REAL compiled langgraph team, all 4 contracts —
+│   │                                  # renamed from run_graph.py (this repo's M5 script already owns that name)
+│   └── run_mcp_server_selfcheck.py  # [M6] demo: spawns contract_server.py as a real subprocess, drives it
+│                                      # over real stdio JSON-RPC, fires 4 sandbox-escape attempts
 ├── tests/
 │   ├── test_llm_client.py
 │   ├── test_parser.py
@@ -244,20 +347,30 @@ shopsense/
 │   │   ├── test_generate.py
 │   │   ├── test_eval_retrieval.py
 │   │   └── test_eval_groundedness.py
-│   └── test_workflow/        # [M5] 18 files — see the M5 note above for the langgraph-gated vs executed split
+│   ├── test_workflow/        # [M5] 18 files — see the M5 note above for the langgraph-gated vs executed split
+│   │   ├── test_state.py
+│   │   ├── test_extract.py
+│   │   ├── test_extract_adapters.py
+│   │   ├── test_compare_to_playbook.py
+│   │   ├── test_draft_redline.py
+│   │   ├── test_routing.py
+│   │   ├── test_human_approval.py
+│   │   ├── test_graph.py            # gated: pytest.importorskip("langgraph")
+│   │   ├── test_finalize.py
+│   │   ├── test_checkpointing.py    # thread_config/checkpoint_file_size — no langgraph needed
+│   │   ├── test_checkpointing_sqlite.py  # gated: pytest.importorskip("langgraph.checkpoint.sqlite")
+│   │   ├── test_checklist.py
+│   │   └── test_records_loader.py
+│   └── test_team/            # [M6] 8 files, 227 tests independent of langgraph/mcp/fastmcp availability
 │       ├── test_state.py
-│       ├── test_extract.py
-│       ├── test_extract_adapters.py
-│       ├── test_compare_to_playbook.py
-│       ├── test_draft_redline.py
-│       ├── test_routing.py
-│       ├── test_human_approval.py
-│       ├── test_graph.py            # gated: pytest.importorskip("langgraph")
-│       ├── test_finalize.py
-│       ├── test_checkpointing.py    # thread_config/checkpoint_file_size — no langgraph needed
-│       ├── test_checkpointing_sqlite.py  # gated: pytest.importorskip("langgraph.checkpoint.sqlite")
-│       ├── test_checklist.py
-│       └── test_records_loader.py
+│       ├── test_extraction.py         # +dedicated pytest.importorskip("mcp") MCP-fetch integration test
+│       ├── test_playbook_rag.py       # +dedicated pytest.importorskip("mcp") MCP-fetch integration test
+│       ├── test_redline_drafter.py
+│       ├── test_legal_reviewer.py
+│       ├── test_supervisor.py
+│       ├── test_graph.py              # gated: pytest.importorskip("langgraph") — 8 further tests, confirmed
+│       │                                # passing on a real machine with langgraph + mcp/fastmcp installed
+│       └── test_mcp_server.py         # gated: pytest.importorskip("mcp") — real subprocess, real stdio JSON-RPC
 ├── data/
 │   ├── intake/
 │   │   └── records.jsonl        # raw ticket intake records (ticket_id, raw_text, ground_truth, etc.)
@@ -271,8 +384,17 @@ shopsense/
 │   │   ├── index.json              # doc slug/title/section -> markdown path, per document
 │   │   ├── markdown/                # clause-source markdown for each policy doc
 │   │   └── pdf/                      # source PDFs the markdown was authored from
-│   └── eval/
-│       └── golden_set.json      # [M4] 20-item eval set (factual/multi_hop/guardrail/injection/unanswerable)
+│   ├── eval/
+│   │   └── golden_set.json      # [M4] 20-item eval set (factual/multi_hop/guardrail/injection/unanswerable)
+│   ├── contracts/                # [M6] 4 vendor contracts, deliberately cross-referenced against
+│   │                               # corpus/ (including one intentional USD-vs-INR refund conflict)
+│   │   ├── vendor_payments_processor_agreement.md
+│   │   ├── vendor_fulfillment_logistics_agreement.md
+│   │   ├── vendor_warranty_repair_partner_agreement.md
+│   │   └── vendor_returns_processing_agreement.md
+│   └── playbook/
+│       └── negotiation-playbook.md  # [M6] 23 clauses (Preferred/Fallback/Unacceptable), each citing
+│                                      # the specific corpus/ doc + section it's derived from
 ├── outputs/                # run_agent.py batch results land here (gitignored)
 ├── .env
 ├── .gitignore
@@ -293,6 +415,11 @@ pytest tests/test_rag/ -v
 # installed for test_graph.py / test_checkpointing_sqlite.py to run instead
 # of skip — see requirements.txt's M5 section)
 pytest tests/test_workflow/ -v
+
+# just the M6 contract-review team suite (227 tests run regardless; needs
+# langgraph + mcp/fastmcp installed for test_graph.py / test_mcp_server.py
+# to run instead of skip — see requirements.txt's M6 section)
+pytest tests/test_team/ -v
 ```
 
 ## Running the Agent
@@ -380,3 +507,43 @@ module docstring). `show_graph.py`, `run_graph.py`,
 `run_checkpointing_pause.py`/`_resume.py`, and `run_workflow.py` need the
 real `langgraph` (+ `langgraph-checkpoint-sqlite` for the checkpointing pair)
 installed per `requirements.txt`'s M5 section.
+
+## Running the M6 Team
+Every step has its own runnable demo, in build order. No API key is required
+for any of these — every node's LLM path degrades to a deterministic
+fallback with no credentials configured, and the MCP server needs none at
+all:
+
+```bash
+python3 scripts/run_extraction.py       # extraction_node: all 4 contracts
+python3 scripts/run_playbook_rag.py     # extraction -> playbook_rag, one clause per call
+python3 scripts/run_redline_drafter.py  # extraction -> playbook_rag -> redline_drafter
+python3 scripts/run_legal_reviewer.py   # the full 4-node pipeline, one draft entry per call
+python3 scripts/run_supervisor.py       # manual supervisor-driven loop — no langgraph needed
+
+# Step 9 — the MCP contract-repository server, verified against a real
+# subprocess over real stdio JSON-RPC (spawns mcp_server/contract_server.py
+# itself, so nothing else needs to be running first).
+python3 scripts/run_mcp_server_selfcheck.py
+
+# Step 8 + 10 together — the real compiled langgraph team, backed by the
+# real MCP server. Needs BOTH langgraph and mcp/fastmcp installed.
+python3 scripts/run_team_graph.py
+```
+
+`run_extraction.py` through `run_supervisor.py` need no `langgraph` install
+at all — they call each node function directly or drive a plain manual
+while-loop, exactly like the M5 pre-graph demos. `run_mcp_server_selfcheck.py`
+needs `mcp` (and `fastmcp`, or a version of `mcp` that bundles
+`mcp.server.fastmcp`) installed, since it spawns and talks to the real
+server. `run_team_graph.py` needs both `langgraph` and `mcp`/`fastmcp`
+installed, and is the one script that exercises Steps 8 and 10 together —
+confirmed working end to end on a real machine (see the M6 note above for
+the two real bugs a live run there caught).
+
+`requirements.txt`'s M6 section adds `langgraph` (already required by M5),
+`mcp`, and `fastmcp` — `fastmcp` in particular is not bundled with every
+`mcp` package version, so if `mcp_server/contract_server.py` raises
+`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`, install
+`fastmcp` directly (`contract_server.py` tries `from fastmcp import
+FastMCP` first, falling back to `mcp.server.fastmcp`).

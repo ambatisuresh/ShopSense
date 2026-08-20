@@ -86,8 +86,6 @@ emotional cases to human agents.
 > file size assumed on sqlite reattach, when SQLite is free to grow the
 > file on reopen) was fixed and is included in that count.
 >
-> Reference: `Day3 Session 1 - LangGraph and Agent Patterns.ipynb`, Lab B
-> ("Document Approval Workflow") is this milestone's blueprint.
 
 > **M4 note:** production RAG over the 14-document Kartway policy corpus —
 > clause-aware chunking, dense (Qdrant) + BM25 hybrid search (Reciprocal

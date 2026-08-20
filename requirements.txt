@@ -19,3 +19,53 @@ pytest>=8.0.0
 
 # M3
 supermemory==3.55.0
+
+# ShopSense M4 (rag/) dependencies. Pinned to match Day2 Session 2's notebook exactly.
+#
+# litellm and python-dotenv you should already have from M1 -- listed here too so this
+# file is complete on its own; pip will just no-op if the version you have already matches.
+#
+# rank-bm25, sentence-transformers, and langchain-text-splitters are optional: rag/ code
+# tries each real library first and falls back to a pure-Python equivalent if it's not
+# installed. Install them for the real (non-fallback) behavior once you reach that step.
+
+# Step 2 -- embeddings
+langchain-google-genai==4.0.0
+
+# Step 3 -- Qdrant Cloud
+qdrant-client==1.18.0
+
+# Step 4 -- BM25 keyword search (optional -- has a pure-Python fallback)
+rank-bm25==0.2.2
+
+# Step 6 -- cross-encoder reranking (optional -- has a pure-Python fallback)
+sentence-transformers==5.6.0
+
+# Step 7 -- LLM calls (generation) -- likely already installed from M1
+litellm==1.92.0
+
+# Step 1 -- chunking's long-clause splitter (optional -- has a pure-Python fallback)
+langchain-text-splitters==1.1.2
+
+# Steps 8/9 -- eval metrics + config loading
+numpy<2
+python-dotenv==1.2.2
+
+# Steps 8/9 -- optional: log eval runs to Langfuse's dashboard
+langfuse>=3.0.0
+
+# --- M5: LangGraph ticket-review workflow (extract -> compare_to_playbook ->
+# draft_redline -> route -> auto_approve/human_approval -> finalize) ---
+# Pinned to match Day3 Session 1's notebook setup cell exactly.
+#
+# langgraph                    -- the graph runtime: workflow/graph.py's
+#                                  StateGraph/START/END/interrupt/Command/compile
+langgraph>=1.2,<2.0
+
+# langgraph-checkpoint-sqlite  -- the DURABLE checkpointer, a SEPARATE package
+#                                  from langgraph itself: workflow/checkpointing.py's
+#                                  build_sqlite_checkpointer(), required for Step 8's
+#                                  real cross-process durability (scripts/run_checkpointing_
+#                                  pause.py / _resume.py) and for tests/test_workflow/
+#                                  test_checkpointing_sqlite.py to run instead of skip.
+langgraph-checkpoint-sqlite>=3.0,<4.0
